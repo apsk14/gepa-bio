@@ -89,13 +89,13 @@ def main():
         evaluator=evaluate,
         config=GEPAConfig(
             engine=EngineConfig(
-                run_dir="outputs/circle_packing",
-                max_metric_calls=150,
+                run_dir="",
+                max_metric_calls=10,
                 track_best_outputs=True,
                 cache_evaluation=True,
                 frontier_type="objective",
             ),
-            reflection=ReflectionConfig(reflection_lm="openai/gpt-5"),
+            reflection=ReflectionConfig(reflection_lm=""),
             refiner=RefinerConfig(),  # A refiner LLM will try to improve the candidate based on the evaluation feedback.
         ),
         objective="Optimize circle packing code to maximize sum of circle radii within a unit square for N=26 circles.",
