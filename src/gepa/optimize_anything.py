@@ -459,7 +459,7 @@ class EngineConfig:
     display_progress_bar: bool = False
     raise_on_exception: bool = True
     use_cloudpickle: bool = True
-    track_best_outputs: bool = False
+    track_best_outputs: bool = True
 
     # Simple stopping conditions
     max_metric_calls: int | None = None
@@ -848,18 +848,14 @@ def make_litellm_lm(model_name: str) -> LanguageModel:
     The returned callable conforms to the ``LanguageModel`` protocol and
     accepts a plain ``str`` prompt, a ``list[dict]`` chat-messages list, or
     a multimodal messages list (with content arrays containing images).
+
+    Uses :class:`gepa.lm.LM` which handles reasoning model detection
+    (o1/o3/o4/gpt-5), retries with exponential backoff, truncation
+    warnings, and ``drop_params=True`` for cross-model compatibility.
     """
-    import litellm
+    from gepa.lm import LM
 
-    def _lm(prompt: str | list[dict[str, Any]]) -> str:
-        if isinstance(prompt, str):
-            messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
-        else:
-            messages = prompt
-        completion = litellm.completion(model=model_name, messages=messages)
-        return completion.choices[0].message.content  # type: ignore[union-attr]
-
-    return _lm
+    return LM(model_name)
 
 
 class EvaluatorWrapper:
