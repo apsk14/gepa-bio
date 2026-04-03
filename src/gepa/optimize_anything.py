@@ -133,6 +133,7 @@ from gepa.logging.logger import Logger, LoggerProtocol, StdOutLogger
 from gepa.proposer.merge import MergeProposer
 from gepa.proposer.reflective_mutation.base import CandidateSelector, LanguageModel, ReflectionComponentSelector
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
+from gepa.strategies.acceptance import AcceptanceCriterion, ImprovementOrEqualAcceptance, StrictImprovementAcceptance
 from gepa.strategies.batch_sampler import BatchSampler, EpochShuffledBatchSampler
 from gepa.strategies.candidate_selector import (
     CurrentBestCandidateSelector,
@@ -472,6 +473,11 @@ class EngineConfig:
     ] = "pareto"
     frontier_type: FrontierType = "hybrid"
 
+    # Acceptance criterion for reflective mutation proposals
+    acceptance_criterion: AcceptanceCriterion | Literal[
+        "strict_improvement", "improvement_or_equal"
+    ] = "strict_improvement"
+
     # Parallelization settings for evaluation
     parallel: bool = True
     max_workers: int | None = field(default_factory=lambda: os.cpu_count() or 32)
@@ -785,9 +791,73 @@ class TrackingConfig:
     use_wandb: bool = False
     wandb_api_key: str | None = None
     wandb_init_kwargs: dict[str, Any] | None = None
+    wandb_attach_existing: bool = False
+    """Attach to an already-active W&B run without managing its lifecycle.
+
+    When ``True``, GEPA logs metrics and tables into the run that is already
+    active in the process (``wandb.run``) — it will not call ``wandb.init()``
+    on entry or ``wandb.finish()`` on exit.
+    """
+    wandb_step_metric: str | None = None
+    """Custom x-axis metric name for wandb charts.
+
+    When set, GEPA uses ``wandb.define_metric`` to declare a custom x-axis
+    for all its metrics, decoupling them from wandb's global monotonic step
+    counter.  The ``step`` value passed to ``log_metrics`` is injected as a
+    regular metric (under this name) instead of being passed as ``step=``.
+
+    **Required when embedding GEPA inside a host training loop** that manages
+    its own wandb step counter.  Without this, GEPA's ``step=1, 2, 3, ...``
+    collides with the host's ``step=100, 101, ...``, causing wandb to drop
+    GEPA's data.
+
+    Example::
+
+        TrackingConfig(
+            use_wandb=True,
+            wandb_attach_existing=True,
+            wandb_step_metric="gepa/iteration",
+        )
+    """
     use_mlflow: bool = False
     mlflow_tracking_uri: str | None = None
     mlflow_experiment_name: str | None = None
+    mlflow_attach_existing: bool = False
+    """Attach to an already-active MLflow run without managing its lifecycle.
+
+    When ``True``, GEPA logs into the run that is already active (via
+    ``mlflow.active_run()``) — it will not call ``mlflow.start_run()`` on
+    entry or ``mlflow.end_run()`` on exit.
+
+    Use this when embedding GEPA inside a training loop that manages its own
+    MLflow run::
+
+        import mlflow
+        with mlflow.start_run():          # caller owns this run
+            result = optimize_anything(
+                ...,
+                config=GEPAConfig(
+                    tracking=TrackingConfig(
+                        use_mlflow=True,
+                        mlflow_attach_existing=True,
+                    )
+                ),
+            )
+            mlflow.log_metric("train/loss", 0.1)  # still works
+    """
+    key_prefix: str = ""
+    """String prepended to every key/name logged to wandb and MLflow.
+
+    Applies uniformly to metric keys, config keys, summary keys, table names,
+    and HTML artifact keys.  Useful when running multiple GEPA optimizations in
+    the same wandb/MLflow run to keep their data namespaced::
+
+        TrackingConfig(
+            use_wandb=True,
+            wandb_attach_existing=True,
+            key_prefix="gepa/round2/",   # metrics become e.g. gepa/round2/val_score
+        )
+    """
 
 
 @dataclass
@@ -1331,6 +1401,27 @@ def optimize_anything(
             f"val_evaluation_policy should be 'full_eval' or an EvaluationPolicy instance, but got {type(config.engine.val_evaluation_policy)}"
         )
 
+    # --- 5b. Build acceptance criterion from EngineConfig ---
+    acceptance_criterion_instance: AcceptanceCriterion
+    if isinstance(config.engine.acceptance_criterion, str):
+        acceptance_factories: dict[str, type[AcceptanceCriterion]] = {
+            "strict_improvement": StrictImprovementAcceptance,
+            "improvement_or_equal": ImprovementOrEqualAcceptance,
+        }
+        try:
+            acceptance_criterion_instance = acceptance_factories[config.engine.acceptance_criterion]()
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown acceptance_criterion: {config.engine.acceptance_criterion}. "
+                "Supported strategies: 'strict_improvement', 'improvement_or_equal'"
+            ) from exc
+    elif isinstance(config.engine.acceptance_criterion, AcceptanceCriterion):
+        acceptance_criterion_instance = config.engine.acceptance_criterion
+    else:
+        raise TypeError(
+            "acceptance_criterion must be a supported string strategy or an instance of AcceptanceCriterion."
+        )
+
     # --- 6. Build module selector from ReflectionConfig ---
     if isinstance(config.reflection.module_selector, str):
         module_selector_cls = {
@@ -1358,9 +1449,13 @@ def optimize_anything(
         use_wandb=config.tracking.use_wandb,
         wandb_api_key=config.tracking.wandb_api_key,
         wandb_init_kwargs=config.tracking.wandb_init_kwargs,
+        wandb_attach_existing=config.tracking.wandb_attach_existing,
+        wandb_step_metric=config.tracking.wandb_step_metric,
         use_mlflow=config.tracking.use_mlflow,
         mlflow_tracking_uri=config.tracking.mlflow_tracking_uri,
         mlflow_experiment_name=config.tracking.mlflow_experiment_name,
+        mlflow_attach_existing=config.tracking.mlflow_attach_existing,
+        key_prefix=config.tracking.key_prefix,
     )
 
     # --- 9. Build reflection prompt template from objective/background if provided ---
@@ -1466,6 +1561,7 @@ def optimize_anything(
         raise_on_exception=config.engine.raise_on_exception,
         stop_callback=stop_callback,
         val_evaluation_policy=config.engine.val_evaluation_policy,
+        acceptance_criterion=acceptance_criterion_instance,
         use_cloudpickle=config.engine.use_cloudpickle,
         evaluation_cache=evaluation_cache,
     )
