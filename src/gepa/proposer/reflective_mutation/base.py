@@ -43,9 +43,21 @@ class Signature:
         raise NotImplementedError
 
     @classmethod
+    def _call_lm_with_retry(cls, lm: LanguageModel, full_prompt, max_retries: int = 2):
+        """Some providers (e.g. OpenRouter/Gemini under safety filters) intermittently
+        return None instead of text. Retry a couple of times before giving up so a
+        transient empty response doesn't waste a reflection iteration."""
+        res = None
+        for _ in range(max_retries + 1):
+            res = lm(full_prompt)
+            if res is not None:
+                return res
+        return res
+
+    @classmethod
     def run(cls, lm: LanguageModel, input_dict: Mapping[str, Any]) -> dict[str, str]:
         full_prompt = cls.prompt_renderer(input_dict)
-        lm_res = lm(full_prompt)
+        lm_res = cls._call_lm_with_retry(lm, full_prompt)
         lm_out = lm_res.strip()
         return cls.output_extractor(lm_out)
 
@@ -59,6 +71,6 @@ class Signature:
             A tuple of (extracted_output, rendered_prompt, raw_lm_output).
         """
         full_prompt = cls.prompt_renderer(input_dict)
-        lm_res = lm(full_prompt)
+        lm_res = cls._call_lm_with_retry(lm, full_prompt)
         lm_out = lm_res.strip()
         return cls.output_extractor(lm_out), full_prompt, lm_out
